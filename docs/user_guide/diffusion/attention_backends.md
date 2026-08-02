@@ -167,6 +167,48 @@ sequence length, since Skip-Softmax only accelerates attention. Dense BF16 is `T
 Requires datacenter Blackwell with `head_dim == 128`; elsewhere, or without FlashInfer, selecting
 `TRTLLM_ATTN` raises rather than silently degrading.
 
+## TRTLLM_ATTN SAGE Quantization
+
+On top of dense/Skip-Softmax, `TRTLLM_ATTN` can run **SAGE** (SageAttention) — the trtllm-gen
+FMHA kernel with per-block quantized Q/K and per-channel fp8 V, so the two attention matmuls run
+in low precision. Enable it through the typed `quant` block on the attention spec:
+
+| Key | Valid values | Meaning |
+|---|---|---|
+| `dtype_qk` | `int8`, `fp8_e4m3` | Quantization dtype for Q and K. Absent ⇒ dense (SAGE off). |
+| `q_block_size` | `1`, `4`, `16` | Per-token block size for Q scales (default `1`). |
+| `k_block_size` | `1`, `4`, `16` | Per-token block size for K scales (default `16`). |
+
+V is always quantized per-channel to fp8_e4m3 and K-smoothing is applied inside the routine, so
+neither is a user knob. Only block sizes `1`, `4`, `16` have compiled kernels.
+
+The `quant` block is a shared `AttnQuantSpec` consumed by more than one backend; each reads the
+fields that apply and rejects the rest. `TRTLLM_ATTN` (SAGE) reads `dtype_qk` (`int8` / `fp8_e4m3`),
+`q_block_size`, and `k_block_size`; `FLASHINFER_ATTN` reads `dtype_qk` (`float16` / `bfloat16`),
+`dtype_vo`, and `flashinfer_backend` (see its section). A `dtype_qk` from the wrong set raises.
+
+```bash
+vllm-omni serve Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --diffusion-attention-config '{"default": {"backend": "TRTLLM_ATTN",
+      "quant": {"dtype_qk": "fp8_e4m3", "q_block_size": 1, "k_block_size": 16}}}'
+```
+
+```python
+from vllm_omni.diffusion.data import AttentionConfig, AttentionSpec, AttnQuantSpec
+
+AttentionConfig(
+    default=AttentionSpec(
+        backend="TRTLLM_ATTN",
+        quant=AttnQuantSpec(dtype_qk="fp8_e4m3", q_block_size=1, k_block_size=16),
+    ),
+)
+```
+
+
+**Requirements.** Needs FlashInfer ≥ 0.6.16rc1. Kernel
+availability is arch-dependent: `fp8_e4m3` QK has kernels on both **SM100** (B200) and **SM103**
+(B300); `int8` QK kernels are compiled for **SM100 only**.
+
 ## End-to-End Benchmark (BF16, sm_120 RTX Pro 6000 Blackwell)
 
 Same prompt and seed across runs. `Total generation time` from `text_to_video.py` / `text_to_image.py`.
@@ -361,64 +403,3 @@ DIFFUSION_ATTENTION_BACKEND=SAGE_ATTN_3 python examples/offline_inference/text_t
     --tensor-parallel-size 2 \
     --output outputs/hv15_sage3.mp4
 ```
-
-### Mixed backends across roles
-
-Use `FLASH_ATTN` for self-attention and `TORCH_SDPA` for cross-attention:
-
-```bash
-python examples/offline_inference/text_to_video/text_to_video.py \
-    --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \
-    --prompt "A dog running across a field of golden wheat." \
-    --diffusion-attention-config.per_role.self.backend FLASH_ATTN \
-    --diffusion-attention-config.per_role.cross.backend TORCH_SDPA \
-    --tensor-parallel-size 2 \
-    --output outputs/wan22_mixed.mp4
-```
-
-### Compare against FlashAttention
-
-Unset the backend override, or explicitly use `FLASH_ATTN`:
-
-```bash
-python examples/offline_inference/text_to_video/text_to_video.py \
-    --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \
-    --prompt "A dog running across a field of golden wheat." \
-    --height 704 --width 1280 --num-frames 49 \
-    --num-inference-steps 30 --seed 42 --guidance-scale 5.0 \
-    --tensor-parallel-size 2 \
-    --output outputs/wan22_fa3.mp4
-```
-
-## Validation Guidance
-
-Don't assume a faster attention backend is numerically interchangeable with `TORCH_SDPA`.
-
-Always compare:
-
-- End-to-end runtime
-- Diffusion-stage runtime (`add_req_and_wait` line in DiffusionEngine.step breakdown)
-- Output quality against a known-good baseline (CLIP similarity, frame-level diff, or visual review)
-
-At minimum, keep the same:
-
-- model
-- prompt
-- seed
-- resolution
-- frame count / step count
-- parallel config (TP / CFG-parallel / Ulysses degrees)
-
-## Reproducing the Benchmark Table
-
-The end-to-end numbers above were collected by running `text_to_video.py` /
-`text_to_image.py` with the same prompt and seed while varying
-`DIFFUSION_ATTENTION_BACKEND`. For a quick kernel-level comparison of the
-backends without loading a model:
-
-```bash
-python benchmarks/diffusion/bench_attention_backends.py --preset hv15
-```
-
-It runs all three BF16 backends on representative DiT attention shapes and
-prints a ranking table at the end.
