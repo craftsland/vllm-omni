@@ -15,7 +15,7 @@ The full set of backends and their platform defaults is in the **Backend Options
 | Value | Notes |
 |---|---|
 | `TRTLLM_ATTN` | FlashInfer's trtllm-gen FMHA (TensorRT-LLM's generated kernels, vendored by FlashInfer). BF16, GQA native, `head_dim=128`. Datacenter Blackwell only (sm_100 / sm_103). Supports **Skip-Softmax** sparse attention — see below. Requires `flashinfer`. |
-| `FLASH_ATTN` | Wraps FlashAttention 2. Default on Hopper / Ada / Ampere when `flash-attn` is installed. |
+| `FLASH_ATTN` | Wraps FlashAttention 4 on Blackwell when `flash-attn-4` is installed, then falls back to FlashAttention 3/2. Default on Hopper / Ada / Ampere when a compatible FlashAttention package is installed. |
 | `CUDNN_ATTN` | Pins `sdpa_kernel([CUDNN_ATTENTION])`. Default on Blackwell (sm_10x / sm_12x) with cuDNN ≥ 9.5. Wins on mask-heavy DiTs (HunyuanVideo-1.5: 2× e2e vs SDPA). |
 | `FLASHINFER_ATTN` | Calls FlashInfer's dense `single_prefill_with_kv_cache` directly with `custom_mask` for non-causal masked attention. Used as Blackwell fallback when cuDNN is unavailable. Requires `flashinfer`. |
 | `TORCH_SDPA` | PyTorch `scaled_dot_product_attention` with the default backend dispatcher. Most conservative; always available. |
@@ -193,9 +193,17 @@ DIFFUSION_ATTENTION_BACKEND=FLASHINFER_ATTN python examples/offline_inference/te
     --model Lightricks/LTX-2 ...
 ```
 
-### FA4 not yet integrated
+### FlashAttention-4 on Blackwell
 
-FlashAttention-4 (released March 2026) targets Blackwell natively and reportedly beats cuDNN by ~20% on B200. As of this writing the `flash-attn-4 4.0.0b10` wheel crashes with `AttributeError: 'NoneType' object has no attribute '_trait'` during JIT on sm_120. Not yet wired into vLLM-Omni; revisit when stable lands.
+Install the optional CUDA 13 extra to use the CuTe-based FA4 path:
+
+```bash
+pip install 'vllm-omni[fa4]'
+```
+
+`FLASH_ATTN` prefers `flash_attn.cute` on Blackwell and falls back to FA3/FA2
+when it is unavailable. Version `4.0.0b18` is required; earlier beta
+wheels had known JIT failures on Blackwell.
 
 ## Choosing a Backend Manually
 
